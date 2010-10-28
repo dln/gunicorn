@@ -3,7 +3,6 @@
 # This file is part of gunicorn released under the MIT license. 
 # See the NOTICE for more information.
 
-from __future__ import with_statement
 
 import errno
 import socket
@@ -27,34 +26,40 @@ class AsyncWorker(base.Worker):
 
     def handle(self, client, addr):
         try:
-            parser = http.RequestParser(client)
             try:
-                while True:
-                    req = None
-                    with self.timeout_ctx():
-                        req = parser.next()
-                    if not req:
-                        break
-                    self.handle_request(req, client, addr)
-            except StopIteration:
-                pass
-        except socket.error, e:
-            if e[0] not in (errno.EPIPE, errno.ECONNRESET):
-                self.log.exception("Socket error processing request.")
-            else:
-                if e[0] == errno.ECONNRESET:
-                    self.log.debug("Ignoring connection reset")
+                parser = http.RequestParser(client)
+                try:
+                    while True:
+                        req = None
+                        timeout = self.timeout_ctx()
+                        try:
+                            req = parser.next()
+                        finally:
+                            timeout.cancel()
+
+                        if not req:
+                            break
+                        self.handle_request(req, client, addr)
+                    
+                except StopIteration:
+                    pass
+            except socket.error, e:
+                if e[0] not in (errno.EPIPE, errno.ECONNRESET):
+                    self.log.exception("Socket error processing request.")
                 else:
-                    self.log.debug("Ignoring EPIPE")
-        except Exception, e:
-            self.log.exception("General error processing request.")
-            try:            
-                # Last ditch attempt to notify the client of an error.
-                mesg = "HTTP/1.0 500 Internal Server Error\r\n\r\n"
-                util.write_nonblock(client, mesg)
-            except:
-                pass
-            return
+                    if e[0] == errno.ECONNRESET:
+                        self.log.debug("Ignoring connection reset")
+                    else:
+                        self.log.debug("Ignoring EPIPE")
+            except Exception, e:
+                self.log.exception("General error processing request.")
+                try:            
+                    # Last ditch attempt to notify the client of an error.
+                    mesg = "HTTP/1.0 500 Internal Server Error\r\n\r\n"
+                    util.write_nonblock(client, mesg)
+                except:
+                    pass
+                return
         finally:
             util.close(client)
 
@@ -62,12 +67,8 @@ class AsyncWorker(base.Worker):
         try:
             debug = self.cfg.debug or False
             self.cfg.pre_request(self, req)
-            resp, environ = wsgi.create(req, sock, addr, self.address, self.cfg)
-            self.nr += 1
-            if self.alive and self.nr >= self.max_requests:
-                self.log.info("Autorestarting worker after current request.")
-                resp.force_close()
-                self.alive = False
+            resp, environ = wsgi.create(req, sock, addr, self.address,
+                    self.cfg)
             respiter = self.wsgi(environ, resp.start_response)
             if respiter == ALREADY_HANDLED:
                 return False
